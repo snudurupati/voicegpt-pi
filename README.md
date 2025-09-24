@@ -1,77 +1,113 @@
-# JarvisPi: Local LLM Voice Assistant
+# JarvisPi: Always-On Local Voice Assistant
 
-JarvisPi is an always-on Raspberry Pi project that turns your device into a **local voice assistant** using open‑source LLMs instead of cloud APIs.  
-It no longer relies on OpenAI API keys — everything runs **fully offline**.
+This project turns a Raspberry Pi 5 into a **voice-only assistant** (Jarvis-style), powered by local open-source models.  
+No OpenAI API or cloud dependency required.
 
-## Current Setup
-
-- **Hardware**
-  - Raspberry Pi 5 (16 GB RAM, NVMe SSD boot)
-  - Poly Sync 10 (USB speaker + microphone)
-- **Software**
-  - [llama.cpp](https://github.com/ggerganov/llama.cpp) built with CMake and OpenBLAS
-  - Qwen2.5‑7B‑Instruct (quantized GGUF, Q4_K_M or Q5_K_M)
-  - Systemd service running `llama-server` on boot
-  - Web interface and REST API available on LAN (`http://jarvispi.local:8080`)
+---
 
 ## Features
 
-- Local inference of 7B LLM (Qwen2.5) on Pi 5 — no cloud dependency
-- REST API (`/completion`) and health endpoint (`/health`)
-- Built‑in web chat UI accessible from any device on the LAN
-- Auto‑start at boot via `systemd`
-- Configurable context size, threads, quantization levels
+- 🎙️ **Voice input** with `arecord`  
+  - Works with USB mics/speakerphones (tested on Poly Sync 10).  
+  - Prime + retry logic ensures reliable capture.
 
-## Installation Summary
+- 🧠 **Speech-to-Text (STT)** via [whisper.cpp](https://github.com/ggerganov/whisper.cpp)  
+  - Converts captured audio into text locally.
 
-1. **Build llama.cpp**  
+- 🤖 **Local LLM** with [llama.cpp](https://github.com/ggerganov/llama.cpp)  
+  - Runs models like `qwen2.5-7b-instruct` in server mode.  
+  - Reachable via REST API (`http://jarvispi.local:8080`).
+
+- 🔊 **Text-to-Speech (TTS)** via [piper](https://github.com/rhasspy/piper)  
+  - Natural-sounding voices, runs fully on-device.  
+  - Patched to handle sample-rate quirks.  
+  - Added **priming + prepended silence** so the first word isn’t clipped.
+
+- ⚡ **Configurable via environment variables** (mic device, sample rate, TTS timings, etc.)
+
+---
+
+## Workflow
+
+1. **Record audio** → USB mic with `arecord`  
+2. **Transcribe** → Whisper model (tiny/small recommended on RPi5)  
+3. **LLM completion** → POST transcript to `llama-server`  
+4. **TTS synthesis** → Piper generates speech  
+5. **Playback** → Audio routed back to speakerphone
+
+---
+
+## Install Summary
+
+1. **Clone repos & build**  
+   - `llama.cpp` (for local LLM)  
+   - `whisper.cpp` (for STT)  
+   - `piper` (for TTS)
+
+2. **Run llama-server** (systemd unit provided):
    ```bash
-   cd /srv/llm/llama.cpp
-   cmake -B build -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS
-   cmake --build build --config Release -j$(nproc)
+   curl http://jarvispi.local:8080/health
    ```
 
-2. **Download & merge model (example Qwen2.5‑7B‑Instruct Q5_K_M)**  
+3. **Set up voices** (Piper):
    ```bash
-   huggingface-cli download Qwen/Qwen2.5-7B-Instruct-GGUF      qwen2.5-7b-instruct-q5_k_m.gguf
+   # example
+   voices/en_US-amy-medium.onnx
+   voices/en_US-amy-medium.onnx.json
    ```
 
-3. **Test run manually**  
+4. **Symlink espeak-ng data** (fix missing phontab):
    ```bash
-   ./build/bin/llama-cli -m /srv/llm/models/qwen2.5-7b-instruct-q5_k_m.gguf -c 4096 -t 4 -ngl 0 -i
-   ```
-   ```bash
-   /srv/llm/llama.cpp/build/bin/llama-gguf-split --merge qwen2.5-7b-instruct-q5_k_m-00001-of-00002.gguf qwen2.5-7b-instruct-q5_k_m.gguf
-	```
-	
-4. **Systemd service** ensures auto‑start:  
-   ```ini
-   [Service]
-   User=snudurupati
-   WorkingDirectory=/srv/llm/llama.cpp
-   EnvironmentFile=/etc/default/llama-server
-   ExecStart=/srv/llm/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8080
-   Restart=always
-   RestartSec=2
+   sudo ln -s /usr/lib/aarch64-linux-gnu/espeak-ng-data /usr/share/espeak-ng-data
    ```
 
-## Usage
+5. **Run the voice loop**:
+   ```bash
+   ./ask_voice.py
+   ```
 
-- Web UI: `http://jarvispi.local:8080`
-- Health check:  
-  ```bash
-  curl -s http://jarvispi.local:8080/health
-  ```
-- Completion:  
-  ```bash
-  curl -s http://jarvispi.local:8080/completion     -H "Content-Type: application/json"     -d '{"prompt":"Say hi in one short line.","n_predict":32}'
-  ```
+---
+
+## Config (Environment Variables)
+
+| Variable         | Default                     | Purpose |
+|------------------|-----------------------------|---------|
+| `MIC_DEV`        | `hw:2,0`                   | ALSA device for mic capture |
+| `RATE`           | `16000`                    | Capture sample rate |
+| `SECONDS_TO_RECORD` | `5`                     | Recording duration |
+| `WHISPER_BIN`    | `/srv/asr/whisper.cpp/build/bin/whisper-cli` | Path to whisper binary |
+| `WHISPER_MODEL`  | `/srv/asr/whisper.cpp/models/ggml-small.en.bin` | STT model |
+| `LLAMA_HOST`     | `http://127.0.0.1:8080`    | llama-server REST endpoint |
+| `N_PREDICT`      | `256`                      | Tokens to predict |
+| `PIPER_BIN`      | `/srv/tts/piper/build/piper` | Path to piper binary |
+| `PIPER_MODEL`    | `/srv/tts/voices/en_US-amy-medium.onnx` | TTS voice model |
+| `PIPER_CONFIG`   | `$PIPER_MODEL.json`        | Voice config JSON |
+| `SPEAKER_DEV`    | `plughw:2,0`               | ALSA device for playback |
+| `TTS_PAD_MS`     | `400`                      | Prepend silence (ms) to WAV |
+| `TTS_PRIME_SEC`  | `0.30`                     | Duration of ALSA `/dev/zero` prime |
+| `TTS_SETTLE_SEC` | `0.20`                     | Wait after prime before playback |
+
+---
+
+## What Works Today
+
+✅ End-to-end local pipeline (record → Whisper → llama-server → Piper → speaker)  
+✅ No cloud dependencies (fully offline)  
+✅ Fix for clipped first words in audio playback  
+✅ Configurable timings for different hardware  
+✅ Web access to LLM via `http://jarvispi.local:8080`
+
+---
 
 ## Next Steps
 
-- **ASR (Automatic Speech Recognition):** integrate `whisper.cpp` or `faster-whisper` for voice input.  
-- **TTS (Text to Speech):** integrate [Piper](https://github.com/rhasspy/piper) to play LLM responses aloud.  
-- **Pipeline Goal:** Mic → Whisper → llama-server → Piper → Speaker.
+- Add **wake-word** (e.g. with [openWakeWord](https://github.com/dscripka/openWakeWord))  
+- Continuous VAD-based listening  
+- Auto-start `ask_voice.py` as a systemd service  
+- Explore lightweight voices & smaller STT models for faster runtime
 
 ---
-Fully local. Always on. No cloud required.
+
+## License
+
+MIT — free to use, hack, and extend.
